@@ -1,0 +1,323 @@
+---
+title: "final-3 Notebook"
+output: html_notebook
+---
+
+```{r 数据加载和预处理}
+# 导入必要的库
+library(readr)
+library(dplyr)
+library(lubridate)
+
+# 加载数据
+data <- read_csv("stock.csv")
+
+# 数据概览
+str(data)
+summary(data)
+
+# 数据预处理
+
+# 转换日期格式
+data$Date <- mdy(data$Date)
+
+# 转换价格和交易量为数值格式
+# 删除美元符号，并将价格转换为数值类型
+data$`Close/Last` <- as.numeric(gsub("\\$", "", data$`Close/Last`))
+data$Open <- as.numeric(gsub("\\$", "", data$Open))
+data$High <- as.numeric(gsub("\\$", "", data$High))
+data$Low <- as.numeric(gsub("\\$", "", data$Low))
+
+# 查看每列的缺失值数量
+colSums(is.na(data))
+# 删除含有缺失值的行
+data <- na.omit(data)
+
+# 范围和逻辑一致性检查
+data <- data %>%
+  filter(Open <= High, Open >= Low, `Close/Last` <= High, `Close/Last` >= Low)
+
+# 对每个公司的时间序列进行排序
+data <- data %>%
+  arrange(Company, Date)
+
+# 再次检查处理后的数据
+str(data)
+head(data)
+
+```
+
+```{r 数据可视化}
+# 导入必要的库
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(lubridate)
+library(corrplot)
+library(reshape2)
+
+# 数据可视化
+
+# 折线图 — 展示每个公司的股价随时间的变化
+ggplot(data, aes(x = Date, y = `Close/Last`, color = Company)) +
+  geom_line() +
+  facet_wrap(~Company, scales = "free_x") + # 每个折线图都显示x轴
+  theme_minimal() +
+  theme(
+     axis.text.x = element_text(angle = 45, vjust = 0.5), # 将标签旋转90度
+     strip.text.x = element_text(size = 8),               # 减小facet标签的文本大小
+     panel.spacing = unit(2, "lines")                      # 增加折线图之间的间距
+   ) +
+  labs(x = "日期", y = "股价($)", color = "Stock")
+
+# 条形图 - 展示每个公司在特定日期的交易量
+ggplot(data, aes(x = reorder(Company, Volume), y = Volume, fill = Company)) +
+  geom_bar(stat = "identity") +
+  labs(title = "2023年7月17日各公司的交易量", x = "公司", y = "交易量") +
+  theme_minimal() +
+  theme(legend.position = "none") # 不显示图例
+
+# 箱线图 - 显示不同公司收盘价的分布情况
+ggplot(data, aes(x = Company, y = `Close/Last`, fill = Company)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "公司收盘价分布情况", x = "公司", y = "收盘价")
+
+# 散点图 - 展示收盘价与交易量的关系
+ggplot(data, aes(x = `Close/Last`, y = Volume, color = Company)) +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "收盘价与交易量关系", x = "收盘价", y = "交易量")
+
+
+# 相关性分析
+
+
+# 计算不同公司股价的相关系数
+# 数据透视以便每个公司的股价作为一个变量
+data_wide <- data %>%
+  dplyr::select(Company, Date, `Close/Last`) %>%
+  spread(key = Company, value = `Close/Last`)
+
+# 计算相关矩阵
+cor_matrix <- cor(data_wide[,-1], use = "complete.obs") # 排除日期列
+
+# 可视化 - 相关性矩阵
+corrplot(cor_matrix, method = "circle")
+
+# 生成热图
+# 计算每个公司每个季度的平均收盘价
+avg_close_prices <- data %>%
+  mutate(Quarter = paste0(year(Date), "-Q", quarter(Date))) %>% # 添加季度列
+  group_by(Company, Quarter) %>%
+  summarise(Avg_Close = mean(`Close/Last`, na.rm = TRUE), .groups = "drop") %>%
+  ungroup()
+
+# 选择最近几年的数据进行绘制
+recent_data <- avg_close_prices %>%
+  filter(Quarter >= "2018-Q1") # 选择2018年第一季度及以后的数据
+
+# 转换数据为宽格式，以便于绘制热图
+recent_data_wide <- recent_data %>%
+  spread(key = Quarter, value = Avg_Close)
+
+# 使用melt函数将宽格式数据转换为长格式
+recent_data_long <- melt(recent_data_wide, id.vars = 'Company')
+
+# 热图 - 展示不同日期不同公司平均收盘价
+ggplot(recent_data_long, aes(x = variable, y = Company, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "不同公司不同季度的平均收盘价热图", x = "季度", y = "公司") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) # 旋转X轴标签以便于阅读
+
+```
+
+```{r 股票不动性分析与推荐最佳潜⼒股}
+# 导入必要的库
+library(dplyr)
+library(ggplot2)
+
+
+# 计算每个公司每日的收益率
+data <- data %>%
+  group_by(Company) %>%
+  mutate(Daily_Return = (`Close/Last` - lag(`Close/Last`, default = first(`Close/Last`))) / lag(`Close/Last`, default = first(`Close/Last`))) %>%
+  ungroup()
+
+# 计算每个公司的价格波动性、交易量稳定性，以及价格极值
+volatility_extremes <- data %>%
+  group_by(Company) %>%
+  summarise(
+    Price_Volatility = sd(`Close/Last`, na.rm = TRUE),
+    Volume_Stability = sd(Volume, na.rm = TRUE),
+    Avg_Daily_Return = mean(Daily_Return, na.rm = TRUE),
+    Max_Close = max(`Close/Last`, na.rm = TRUE),
+    Min_Close = min(`Close/Last`, na.rm = TRUE),
+    Max_Close_Date = Date[which.max(`Close/Last`)],
+    Min_Close_Date = Date[which.min(`Close/Last`)]
+  ) %>%
+  ungroup()
+
+# 识别价格波动性低和交易量稳定的股票
+stable_stocks <- volatility_extremes %>%
+  filter(Price_Volatility < quantile(Price_Volatility, 0.25),
+         Volume_Stability < quantile(Volume_Stability, 0.25))
+# 输出稳定股
+print(stable_stocks)
+
+
+# 基于价格波动性推荐最佳潜力股
+potential_stocks <- volatility_extremes %>%
+  filter(Price_Volatility < quantile(Price_Volatility, 0.5)) %>%
+  arrange(Avg_Daily_Return)
+# 输出潜力股
+print(potential_stocks)
+
+```
+
+```{r 模型选择和比较}
+# 导入必要的库
+library(forecast)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(lubridate)
+library(tseries) # 用于平稳性检测
+library(ggplot2)
+
+# 平稳性检验和非白噪声性检验函数
+check_time_series <- function(ts_data) {
+  
+  # ADF检验，检验平稳性
+  adf_test_result <- adf.test(ts_data)
+  cat(adf_test_result$p.value)
+  # 输出平稳性检验结果
+  if(adf_test_result$p.value < 0.05) {
+    cat(": 序列是平稳的。\n")
+  } else {
+    cat(": 序列是非平稳的，可能需要差分。\n")
+  }
+
+  # 白噪声检验
+  lb_test_result <- Box.test(ts_data, type = "Ljung-Box")
+  cat(lb_test_result$p.value)
+  # 输出白噪声检验结果
+  if(lb_test_result$p.value < 0.05) {
+    cat(": 序列不是白噪声。\n")
+  } else {
+    cat(": 序列可能是白噪声。\n")
+  } 
+  
+  # 绘制ACF和PACF图
+  acf(ts_data)
+  pacf(ts_data)
+  
+}
+
+
+# 思路一 - 为每一个企业建立单独的时间序列模型，ARMA建模/ARIMA建模
+
+
+# 选择一个公司的股价数据作为示例
+company_data <- data %>%
+  filter(Company == "AAPL") %>%
+  dplyr::select(Date, `Close/Last`) %>%
+  arrange(Date)
+
+# 转换成时间序列对象
+ts_data <- ts(company_data$`Close/Last`, frequency = 252) # 假设每年有252个交易日
+
+# 检验平稳性和非白噪声性
+check_time_series(ts_data)
+
+# 一阶差分
+diff_data <- diff(ts_data)
+
+# 检验平稳性和非白噪声性
+check_time_series(diff_data)
+
+
+# 综上所述，应放弃为每一个企业单独建立时间序列模型的方式
+
+
+```
+
+```{r 建立时间序列模型预测股价与模型质量评估 - ARIMAX}
+
+library(MTS)
+
+# 建立时间序列模型预测股价与模型质量评估 - 思路二 ARIMAX
+
+
+forecast_stock <- function(response_company, forecast_days) {
+ 
+  # 将数据转换为宽格式，使每个公司的股价都有自己的列
+  wide_data <- data %>%
+    select(Date, Company, `Close/Last`) %>%
+    spread(key = Company, value = `Close/Last`)
+  
+  # 由于可能存在NA值，使用前一个非NA值填充
+  wide_data <- wide_data %>%
+    fill(everything(), .direction = "down")
+
+  # 提取response_company的股价时间序列作为响应变量
+  ts_rescompany <- ts(wide_data[[response_company]], start = c(year(min(wide_data$Date)), month(min(wide_data$Date))), frequency = 252)
+ 
+  # 移除响应变量所在的列，创建外生变量时间序列
+  ts_exog <- ts(select(wide_data,-Date, -all_of(response_company)), start = c(year(min(wide_data$Date)), month(min(wide_data$Date))), frequency = 252)
+  
+  # 分割时间序列为训练集和测试集
+  ts_rescompany_train <- ts_rescompany[1:(length(ts_rescompany) - forecast_days)]
+  ts_rescompany_test <- ts_rescompany[(length(ts_rescompany) - forecast_days + 1):length(ts_rescompany)]
+
+  ts_exog_train <- ts_exog[1:(nrow(ts_exog) - forecast_days), ]
+  ts_exog_test <- ts_exog[(nrow(ts_exog) - forecast_days + 1):nrow(ts_exog), , drop = FALSE]
+  
+  # 使用训练集拟合ARIMAX模型
+  fit <- auto.arima(ts_rescompany_train, xreg = ts_exog_train)
+  summary(fit)
+  
+  # 使用模型和测试集中的外生变量进行预测
+  forecasted_values <- forecast(fit, xreg = ts_exog_test)
+  
+  # 计算预测准确率
+  accuracy_metrics <- accuracy(forecasted_values, ts_rescompany_test)
+  print(accuracy_metrics)
+  # 计算MAPE并以百分比表示
+  mape <- accuracy_metrics['Test set', 'MAPE']
+  accuracy_percentage <- 100 - mape
+  cat("预测准确率（百分比）:", accuracy_percentage, "%\n")
+  
+  # 平稳性检验和非白噪声检验
+  tsdata <- ts(wide_data, start = c(year(min(wide_data$Date)), month(min(wide_data$Date))), frequency = 252)
+  # 进行多变量 Ljung-Box 测试
+  mq_result <- mq(tsdata, lag = 10)
+  # 打印测试结果
+  print(mq_result)
+
+  # 绘制预测结果
+  plot(forecasted_values)
+
+}
+
+```
+
+```{r 股价预测与模型解读}
+# 用模型进行股价预测
+# 分别预测10家公司的股价
+ forecast_stock("AAPL", 300)
+# forecast_stock("AMD", 300)
+# forecast_stock("AMZN", 300)
+# forecast_stock("CSCO", 300)
+# forecast_stock("META", 300)
+# forecast_stock("MSFT", 300)
+# forecast_stock("NFLX", 300)
+# forecast_stock("QCOM", 300)
+# forecast_stock("SBUX", 300)
+# forecast_stock("TSLA", 300)
+
+```
+
